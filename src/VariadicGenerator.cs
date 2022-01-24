@@ -6,13 +6,34 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace VariadicGenerics.SourceGenerator
 {
+    public static class ree
+    {
+        public static void Deconstruct<TKey, TValue>(this KeyValuePair<TKey, TValue> pair, out TKey key, out TValue value)
+        {
+            key = pair.Key;
+            value = pair.Value;
+        }
+    }
+
     [Generator]
     public sealed class VariadicGenerator : ISourceGenerator
     {
+        internal sealed class InductionBuilder
+        {
+            public (ITypeSymbol, IMethodSymbol)? Base { get; set; }
+            public IMethodSymbol? Transition { get; set; }
+            public (ITypeSymbol, IMethodSymbol)? Finalization { get; set; }
+
+            public Induction ToInduction()
+                => new(Base ?? throw new(), Transition ?? throw new(), Finalization ?? throw new());
+        }
+
+        internal record struct Induction((ITypeSymbol, IMethodSymbol) Base, IMethodSymbol Transition, (ITypeSymbol, IMethodSymbol) Finalization);
+
         public void Execute(GeneratorExecutionContext context)
         {
             var receiver = (SyntaxReceiver)context.SyntaxContextReceiver!;
-            var variadicMethods = new List<(IMethodSymbol original, int arity)>();
+            var variadicMethodBuilder = new Dictionary<string, InductionBuilder>();
 
             foreach (var list in receiver!.GetGenericArgumentLists())
             {
@@ -24,21 +45,33 @@ namespace VariadicGenerics.SourceGenerator
 
                 if (symbol is IMethodSymbol methodSymbol)
                 {
-                    if (methodSymbol.IsGenericMethod
-                        && methodSymbol.ConstructedFrom is
-                            IMethodSymbol originalDefinition
-                        && originalDefinition.TypeParameters.SingleOrDefault() is
-                            ITypeParameterSymbol genericParameter
-                        && genericParameter.GetAttributes().SingleOrDefault(
-                            x => x?.AttributeClass?.Name == "VariadicAttribute") is
-                            {} attr)
+                    var attr = symbol.GetAttributes().SingleOrDefault(c =>
+                        c.AttributeClass!.Name.StartsWith("Induction"));
+                    var name = attr?.ConstructorArguments[0].Value?.ToString();
+                    var builder = name switch
                     {
-                        variadicMethods.Add((originalDefinition, list.Arguments.Count));
+                        { } when variadicMethodBuilder.TryGetValue(name, out var existing) => existing,
+                        { } => variadicMethodBuilder[name] = new(),
+                        _ => null
+                    };
+                    switch (attr)
+                    {
+                        case { AttributeClass: { Name: "InductionBaseOfAttribute" } }:
+                            builder!.Base = (methodSymbol.ReturnType, methodSymbol);
+                            break;
+                        case { AttributeClass: { Name: "InductionTransitionOfAttribute" } }:
+                            builder!.Transition = methodSymbol;
+                            break;
+                        case { AttributeClass: { Name: "InductionFinalizationOfAttribute" } }:
+                            builder!.Finalization = (methodSymbol.ReturnType, methodSymbol);
+                            break;
                     }
                 }
             }
 
-            foreach (var (method, arity) in variadicMethods.Distinct())
+            var inductions = variadicMethodBuilder.ToDictionary(c => c.Key, c => c.Value.ToInduction())!;
+
+            foreach (var (name, ((baseType, baseMethod), transition, (finalType, finalMethod))) in inductions)
             {
                 var types = string.Join(", ",
                     Enumerable.Range(1, arity)
@@ -99,7 +132,7 @@ $@"namespace VariadicGenerics
 }}");
             }
         }
-
+/*
         private static string GetConstraints(ITypeParameterSymbol symbol)
         {
             return string.Join(", ", Impl(symbol));
@@ -132,7 +165,7 @@ $@"namespace VariadicGenerics
                 || symbol.ConstraintTypes.Any()
                 || symbol.ConstraintNullableAnnotations.Any();
         }
-
+*/
         public void Initialize(GeneratorInitializationContext context)
         {
             context.RegisterForSyntaxNotifications(() => new SyntaxReceiver());
