@@ -1,13 +1,13 @@
-﻿// See https://aka.ms/new-console-template for more information
+// See https://aka.ms/new-console-template for more information
 
-using VariadicGenerics;
 using System;
 using System.Text;
 
 Stuff stuff = new();
-Console.WriteLine(Stuff.Concat(1, 2.56f, "aaa"));
+// Console.WriteLine(Stuff.Concat(1, 2.56f, "aaa"));
+Console.WriteLine(Varargs.Heh.Concat<int, float, string>(1, 2.56f, "aaa"));
 
-class Stuff
+partial class Stuff
 {
     [InductionBaseOf("Concat")]
     public static StringBuilder ConcatBase() => new();

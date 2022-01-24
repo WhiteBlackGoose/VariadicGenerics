@@ -1,8 +1,9 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using System.Diagnostics;
 
 namespace VariadicGenerics.SourceGenerator
 {
@@ -34,17 +35,16 @@ namespace VariadicGenerics.SourceGenerator
         {
             var receiver = (SyntaxReceiver)context.SyntaxContextReceiver!;
             var variadicMethodBuilder = new Dictionary<string, InductionBuilder>();
+            var listOfMethods = new List<IMethodSymbol>();
 
-            foreach (var list in receiver!.GetGenericArgumentLists())
+            foreach (var list in receiver!.MethodsWithAttributes)
             {
                 var model = context.Compilation.GetSemanticModel(list.SyntaxTree);
-                var info = model.GetSymbolInfo(list.Parent!);
-                var symbol = info.CandidateReason == CandidateReason.WrongArity
-                    ? info.CandidateSymbols.FirstOrDefault()
-                    : info.Symbol;
+                var symbol = model.GetSymbolInfo(list).Symbol;
 
-                if (symbol is IMethodSymbol methodSymbol)
+                if (symbol is IMethodSymbol calledSymbol)
                 {
+                    var methodSymbol = calledSymbol.OriginalDefinition;
                     var attr = symbol.GetAttributes().SingleOrDefault(c =>
                         c.AttributeClass!.Name.StartsWith("Induction"));
                     var name = attr?.ConstructorArguments[0].Value?.ToString();
@@ -56,138 +56,98 @@ namespace VariadicGenerics.SourceGenerator
                     };
                     switch (attr)
                     {
-                        case { AttributeClass: { Name: "InductionBaseOfAttribute" } }:
+                        case { AttributeClass.Name: "InductionBaseOfAttribute" }:
                             builder!.Base = (methodSymbol.ReturnType, methodSymbol);
                             break;
-                        case { AttributeClass: { Name: "InductionTransitionOfAttribute" } }:
+                        case { AttributeClass.Name: "InductionTransitionOfAttribute" }:
                             builder!.Transition = methodSymbol;
                             break;
-                        case { AttributeClass: { Name: "InductionFinalizationOfAttribute" } }:
+                        case { AttributeClass.Name: "InductionFinalizationOfAttribute" }:
                             builder!.Finalization = (methodSymbol.ReturnType, methodSymbol);
                             break;
                     }
                 }
             }
 
-            var inductions = variadicMethodBuilder.ToDictionary(c => c.Key, c => c.Value.ToInduction())!;
+            var calls = new Dictionary<string, (Induction Induction, int Arity)>();
 
-            foreach (var (name, ((baseType, baseMethod), transition, (finalType, finalMethod))) in inductions)
+            foreach (var list in receiver!.ArgumentSyntaxes)
             {
+                var model = context.Compilation.GetSemanticModel(list.SyntaxTree);
+                var symbol = model.GetSymbolInfo(list.Parent!).Symbol;
+
+                if (symbol is IMethodSymbol calledSymbol && variadicMethodBuilder.TryGetValue(calledSymbol.Name, out var builder))
+                {
+                    Console.WriteLine(symbol);
+                }
+            }
+
+            foreach (var (name, (((baseType, baseMethod), transition, (finalType, finalMethod)), arity)) in calls)
+            {
+                var classType = baseMethod.ContainingType;
                 var types = string.Join(", ",
                     Enumerable.Range(1, arity)
                         .Select(x => $"T{x}"));
-                var constraints = "// No constraints on original method";
-                
-                if (method.TypeParameters.Any(HasConstraint))
-                {
-                    constraints = string.Join("\n            ",
-                        Enumerable.Range(1, arity)
-                            .Select(
-                                x => $"where T{x} : {GetConstraints(method.TypeParameters[0])}"));
-                }
-
-                var parameters = "";
-                if (method.IsExtensionMethod || !method.IsStatic)
-                {
-                    parameters = string.Join(", ",
-                        Enumerable.Range(1, arity)
-                            .Select(x => $"T{x} value{x}")
-                            .Prepend(
-                                $"this {method.ReceiverType!.ToDisplayString()} target"));
-                }
-                else
-                {
-                    parameters = string.Join(", ",
-                        Enumerable.Range(1, arity)
-                            .Select(x => $"T{x} value{x}"));
-                }
-
-                var invocations = "";
-                if (method.IsExtensionMethod || !method.IsStatic)
-                {
-                    invocations = string.Join("\n            ",
-                        Enumerable.Range(1, arity)
-                            .Select(
-                                x => $"target.{method.Name}(value{x});"));
-                }
-                else
-                {
-                    invocations = string.Join("\n            ",
-                        Enumerable.Range(1, arity)
-                            .Select(
-                                x => $"{method.Name}(value{x});"));
-                }
-
-                context.AddSource($"VariadicMethod.{method.Name}.{arity}.cs",
-$@"namespace VariadicGenerics
+                var parameters = string.Join(", ",
+                    Enumerable.Range(1, arity)
+                        .Select(x => $"T{x} value{x}"));
+                var steps =
+                    Enumerable.Range(1, arity)
+                    .Select(c => $"value = {transition.Name}(value);\n");
+                var src = 
+$@"namespace {classType.ContainingNamespace}
 {{
-    internal static class Extensions
+    partial class {classType.Name}
     {{
-        public static {method.ReturnType.ToDisplayString()} {method.Name}<{types}>({parameters})
-            {constraints}
+        public static {finalType.ToDisplayString()} {name}<{types}>({parameters})
         {{
-            {invocations}
+            var value = {baseMethod.Name}();
+            {string.Join("", steps)}
+            return {finalMethod.Name}(value);
         }}
     }}
-}}");
-            }
-        }
-/*
-        private static string GetConstraints(ITypeParameterSymbol symbol)
-        {
-            return string.Join(", ", Impl(symbol));
-
-            static IEnumerable<string> Impl(ITypeParameterSymbol symbol)
-            {
-                if (symbol.HasConstructorConstraint)
-                    yield return "new()";
-                if (symbol.HasNotNullConstraint)
-                    yield return "notnull";
-                if (symbol.HasReferenceTypeConstraint)
-                    yield return "class";
-                else if (symbol.HasValueTypeConstraint)
-                    yield return "struct";
-                else if (symbol.HasUnmanagedTypeConstraint)
-                    yield return "unmanaged";
-
-                foreach (var type in symbol.ConstraintTypes)
-                    yield return type.ToDisplayString();
+}}";
+                context.AddSource($"VariadicMethod.{name}.{arity}.cs", src);
             }
         }
 
-        private static bool HasConstraint(ITypeParameterSymbol symbol)
-        {
-            return symbol.HasConstructorConstraint
-                || symbol.HasNotNullConstraint
-                || symbol.HasReferenceTypeConstraint
-                || symbol.HasUnmanagedTypeConstraint
-                || symbol.HasValueTypeConstraint
-                || symbol.ConstraintTypes.Any()
-                || symbol.ConstraintNullableAnnotations.Any();
-        }
-*/
         public void Initialize(GeneratorInitializationContext context)
         {
+#if DEBUG
+            if (!Debugger.IsAttached)
+            {
+                Debugger.Launch();
+            }
+#endif 
             context.RegisterForSyntaxNotifications(() => new SyntaxReceiver());
         }
 
         private sealed class SyntaxReceiver : ISyntaxContextReceiver
         {
-            private readonly List<TypeArgumentListSyntax> _typeArgumentLists;
+            private readonly List<ArgumentSyntax> _typeArgumentLists;
+            private readonly List<MethodDeclarationSyntax> _methodsWithInductionAttributes;
 
             public SyntaxReceiver()
             {
                 _typeArgumentLists = new();
+                _methodsWithInductionAttributes = new();
             }
 
-            public IEnumerable<TypeArgumentListSyntax> GetGenericArgumentLists()
+            public IReadOnlyList<ArgumentSyntax> ArgumentSyntaxes
                 => _typeArgumentLists;
+
+            public IReadOnlyList<MethodDeclarationSyntax> MethodsWithAttributes
+                => _methodsWithInductionAttributes;
 
             public void OnVisitSyntaxNode(GeneratorSyntaxContext context)
             {
-                if (context.Node is TypeArgumentListSyntax typeArguments)
+                if (context.Node is ArgumentSyntax args)
                 {
-                    _typeArgumentLists.Add(typeArguments);
+                    _typeArgumentLists.Add(args);
+                }
+                else if (context.Node is MethodDeclarationSyntax method && method.AttributeLists.Count > 0)
+                {
+                    _methodsWithInductionAttributes.Add(method);
                 }
             }
         }
