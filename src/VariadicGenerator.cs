@@ -37,11 +37,11 @@ namespace VariadicGenerics.SourceGenerator
             var variadicMethodBuilder = new Dictionary<string, InductionBuilder>();
             var listOfMethods = new List<IMethodSymbol>();
 
-            foreach (var list in receiver!.MethodsWithAttributes)
+            foreach (var methodDecl in receiver!.MethodsWithAttributes)
             {
-                var model = context.Compilation.GetSemanticModel(list.SyntaxTree);
-                var symbol = model.GetSymbolInfo(list).Symbol;
-
+                var model = context.Compilation.GetSemanticModel(methodDecl.SyntaxTree);
+                var symbol = model.GetDeclaredSymbol(methodDecl);
+                
                 if (symbol is IMethodSymbol calledSymbol)
                 {
                     var methodSymbol = calledSymbol.OriginalDefinition;
@@ -69,20 +69,23 @@ namespace VariadicGenerics.SourceGenerator
                 }
             }
 
-            var calls = new Dictionary<string, (Induction Induction, int Arity)>();
+            var calls = new Dictionary<(string Name, int Arity), Induction>();
 
             foreach (var list in receiver!.ArgumentSyntaxes)
             {
                 var model = context.Compilation.GetSemanticModel(list.SyntaxTree);
                 var symbol = model.GetSymbolInfo(list.Parent!).Symbol;
 
-                if (symbol is IMethodSymbol calledSymbol && variadicMethodBuilder.TryGetValue(calledSymbol.Name, out var builder))
+                if (list.Expression is InvocationExpressionSyntax invocation)
+                if (invocation.Expression is MemberAccessExpressionSyntax memberAccess)
+                if (variadicMethodBuilder.TryGetValue(memberAccess.Name.Identifier.ToString(), out var builder))
                 {
-                    Console.WriteLine(symbol);
+                    var count = invocation.ArgumentList.Arguments.Count;
+                    calls[(memberAccess.Name.Identifier.ToString(), count)] = builder.ToInduction();
                 }
             }
 
-            foreach (var (name, (((baseType, baseMethod), transition, (finalType, finalMethod)), arity)) in calls)
+            foreach (var ((name, arity), ((baseType, baseMethod), transition, (finalType, finalMethod))) in calls)
             {
                 var classType = baseMethod.ContainingType;
                 var types = string.Join(", ",
@@ -93,10 +96,9 @@ namespace VariadicGenerics.SourceGenerator
                         .Select(x => $"T{x} value{x}"));
                 var steps =
                     Enumerable.Range(1, arity)
-                    .Select(c => $"value = {transition.Name}(value);\n");
+                    .Select(c => $"value = {transition.Name}(value{c}, value);\n");
                 var src = 
-$@"namespace {classType.ContainingNamespace}
-{{
+$@"
     partial class {classType.Name}
     {{
         public static {finalType.ToDisplayString()} {name}<{types}>({parameters})
@@ -106,19 +108,21 @@ $@"namespace {classType.ContainingNamespace}
             return {finalMethod.Name}(value);
         }}
     }}
-}}";
+";
+                if (!classType.ContainingNamespace.IsGlobalNamespace)
+                    src = $"namespace {classType.ContainingNamespace}\n{{\n{src}\n}}";
                 context.AddSource($"VariadicMethod.{name}.{arity}.cs", src);
             }
         }
 
         public void Initialize(GeneratorInitializationContext context)
         {
-#if DEBUG
-            if (!Debugger.IsAttached)
-            {
-                Debugger.Launch();
-            }
-#endif 
+// #if DEBUG
+//             if (!Debugger.IsAttached)
+//             {
+//                 Debugger.Launch();
+//             }
+// #endif 
             context.RegisterForSyntaxNotifications(() => new SyntaxReceiver());
         }
 

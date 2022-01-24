@@ -5,7 +5,7 @@ using System.Text;
 
 Stuff stuff = new();
 // Console.WriteLine(Stuff.Concat(1, 2.56f, "aaa"));
-Console.WriteLine(Varargs.Heh.Concat<int, float, string>(1, 2.56f, "aaa"));
+Console.WriteLine(Stuff.Concat(1, 2.56f, "aaa", 4343));
 
 partial class Stuff
 {
@@ -14,12 +14,11 @@ partial class Stuff
 
     [InductionTransitionOf("Concat")]
     public static StringBuilder ConcatTransition<T>(T value, StringBuilder folded)
-        where T : class
     {
         if (typeof(T) == typeof(int))
-            folded.Append((int) (object) value);
+            folded.Append((int) ((object) value!)!);
         else if (typeof(T) == typeof(float))
-            folded.Append((float) (object) value);
+            folded.Append((float) ((object) value!)!);
         else
             folded.Append(value);
         return folded;
